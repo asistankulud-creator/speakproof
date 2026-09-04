@@ -1,0 +1,18 @@
+{
+  "name": "speakproof",
+  "version": "0.1.0",
+  "private": false,
+  "description": "Speakproof — live disclosure-compliance guardrail for regulated conversations, built on AssemblyAI streaming speech-to-text.",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node src/server.mjs",
+    "dev": "node --watch src/server.mjs"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  }
+}
