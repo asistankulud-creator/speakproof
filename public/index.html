@@ -1,0 +1,207 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Speakproof — live disclosure compliance</title>
+<style>
+  :root{
+    --bg:#0b0f14; --panel:#141b23; --line:#243040; --ink:#e6edf3; --muted:#8b9bb0;
+    --ok:#3fb950; --pending:#6e7c8f; --warn:#f0883e; --crit:#f85149; --accent:#58a6ff;
+    --font:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.55 var(--font)}
+  header{padding:18px 22px;border-bottom:1px solid var(--line);display:flex;gap:14px;align-items:center;flex-wrap:wrap}
+  h1{font-size:17px;margin:0;letter-spacing:-.01em}
+  h1 span{color:var(--muted);font-weight:400}
+  .pill{font-size:12px;padding:3px 9px;border-radius:999px;border:1px solid var(--line);color:var(--muted)}
+  .pill.live{color:var(--ok);border-color:#1c4a28}
+  .pill.stub{color:var(--warn);border-color:#54341a}
+  main{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:18px;padding:18px 22px;align-items:start}
+  @media(max-width:880px){main{grid-template-columns:1fr}}
+  .panel{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:16px}
+  .panel h2{font-size:12px;text-transform:uppercase;letter-spacing:.09em;color:var(--muted);margin:0 0 12px}
+  button{font:inherit;border-radius:7px;border:1px solid var(--line);background:#1b2632;color:var(--ink);padding:9px 15px;cursor:pointer}
+  button:hover:not(:disabled){border-color:var(--accent)}
+  button:disabled{opacity:.45;cursor:not-allowed}
+  button.primary{background:var(--accent);border-color:var(--accent);color:#04121f;font-weight:600}
+  .controls{display:flex;gap:9px;flex-wrap:wrap;margin-bottom:6px}
+  ul{list-style:none;margin:0;padding:0}
+  li.item{display:flex;gap:11px;padding:11px 0;border-bottom:1px solid var(--line);align-items:flex-start}
+  li.item:last-child{border-bottom:0}
+  .dot{width:17px;height:17px;border-radius:50%;border:2px solid var(--pending);flex:0 0 auto;margin-top:2px;position:relative}
+  .item.done .dot{border-color:var(--ok);background:var(--ok)}
+  .item.done .dot::after{content:"";position:absolute;left:4px;top:1px;width:4px;height:8px;border:solid #08130b;border-width:0 2px 2px 0;transform:rotate(45deg)}
+  .item.missing-crit .dot{border-color:var(--crit)}
+  .label{flex:1}
+  .item.done .label{color:var(--muted);text-decoration:line-through;text-decoration-color:#2f6b3a}
+  .tag{font-size:11px;color:var(--crit);border:1px solid #4a1f1f;padding:1px 6px;border-radius:4px;margin-left:6px}
+  .evidence{display:block;font-size:12px;color:var(--muted);margin-top:3px;font-style:italic}
+  #verdict{margin-top:14px;padding:11px 13px;border-radius:8px;font-weight:600;font-size:14px}
+  .v-ok{background:#0d2b16;color:var(--ok);border:1px solid #1c4a28}
+  .v-bad{background:#2b1113;color:var(--crit);border:1px solid #4a1f1f}
+  #transcript{height:340px;overflow-y:auto;font-size:14px}
+  .turn{padding:7px 0;border-bottom:1px solid #1b2530}
+  .turn:last-child{border-bottom:0}
+  .turn .who{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.06em}
+  .turn.partial{color:var(--muted);font-style:italic}
+  .hit{color:var(--ok);font-size:12px;margin-left:7px}
+  .hint{color:var(--muted);font-size:12.5px;margin:10px 0 0}
+  code{background:#1b2632;padding:1px 5px;border-radius:4px;font-size:12.5px}
+</style>
+</head>
+<body>
+<header>
+  <h1>Speakproof <span>— live disclosure compliance</span></h1>
+  <span id="mode" class="pill">connecting…</span>
+  <span id="scenario" class="pill"></span>
+</header>
+
+<main>
+  <section class="panel">
+    <h2>Required disclosures</h2>
+    <ul id="checklist"></ul>
+    <div id="verdict" class="v-bad">Call not compliant yet</div>
+    <p class="hint">Only the <strong>representative's</strong> speech can satisfy an item — a customer asking “so it’s not guaranteed?” must not tick the box.</p>
+  </section>
+
+  <section class="panel">
+    <h2>Live transcript</h2>
+    <div class="controls">
+      <button id="start" class="primary">Start listening</button>
+      <button id="stop" disabled>Stop</button>
+      <button id="demo">Run scripted demo</button>
+      <button id="swap" title="If the wrong voice is being treated as the representative">Swap rep / customer</button>
+    </div>
+    <div id="transcript"></div>
+    <p class="hint" id="stubHint" hidden>Stub mode: no API key, no credits consumed. “Run scripted demo” feeds synthetic turns through the real pipeline.</p>
+  </section>
+</main>
+
+<script type="module">
+const $ = (s) => document.querySelector(s);
+const wsUrl = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws';
+
+let ws, audioCtx, micStream, node, running = false, isStub = false;
+
+function renderChecklist(status){
+  const ul = $('#checklist');
+  ul.innerHTML = '';
+  for (const it of status.items){
+    const li = document.createElement('li');
+    li.className = 'item' + (it.satisfied ? ' done' : (it.critical ? ' missing-crit' : ''));
+    li.innerHTML = `<span class="dot"></span><span class="label">${escapeHtml(it.label)}` +
+      (!it.satisfied && it.critical ? '<span class="tag">critical</span>' : '') +
+      (it.evidence ? `<span class="evidence">“${escapeHtml(it.evidence)}”</span>` : '') + '</span>';
+    ul.appendChild(li);
+  }
+  const v = $('#verdict');
+  const missingCrit = status.items.filter(i => !i.satisfied && i.critical).length;
+  if (status.complete){ v.className = 'v-ok'; v.textContent = '✓ All required disclosures made'; }
+  else { v.className = 'v-bad'; v.textContent = missingCrit
+      ? `${missingCrit} critical disclosure${missingCrit>1?'s':''} still missing`
+      : 'Call not compliant yet'; }
+}
+
+function addTurn(text, {final=true, speaker='rep', newly=[], label=null}={}){
+  const box = $('#transcript');
+  if (!final){
+    let p = box.querySelector('.turn.partial');
+    if (!p){ p = document.createElement('div'); p.className = 'turn partial'; box.appendChild(p); }
+    p.textContent = text;
+  } else {
+    box.querySelector('.turn.partial')?.remove();
+    const d = document.createElement('div');
+    d.className = 'turn';
+    const who = speaker + (label ? ` · speaker ${label}` : '');
+    d.innerHTML = `<div class="who">${escapeHtml(who)}</div>${escapeHtml(text)}` +
+      (newly.length ? `<span class="hit">✓ satisfied: ${newly.map(escapeHtml).join(', ')}</span>` : '');
+    box.appendChild(d);
+  }
+  box.scrollTop = box.scrollHeight;
+}
+
+const escapeHtml = (s) => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+
+function connect(){
+  ws = new WebSocket(wsUrl);
+  ws.binaryType = 'arraybuffer';
+  ws.onmessage = (ev) => {
+    const msg = JSON.parse(ev.data);
+    if (msg.type === 'ready'){
+      isStub = msg.stub;
+      $('#mode').textContent = isStub ? 'stub mode' : 'live · AssemblyAI';
+      $('#mode').className = 'pill ' + (isStub ? 'stub' : 'live');
+      $('#scenario').textContent = msg.scenario.label;
+      $('#stubHint').hidden = !isStub;
+      $('#start').disabled = isStub;
+      renderChecklist(msg.status);
+    }
+    if (msg.type === 'turn'){
+      addTurn(msg.transcript, { final: msg.final, speaker: msg.speaker, newly: msg.newlySatisfied || [], label: msg.speakerLabel });
+      if (msg.status) renderChecklist(msg.status);
+    }
+    if (msg.type === 'roles') addTurn(`[roles] representative is now speaker ${msg.roles.repLabel ?? '—'}`);
+    if (msg.type === 'error') addTurn('[error] ' + msg.message);
+  };
+  ws.onclose = () => { $('#mode').textContent = 'disconnected'; $('#mode').className = 'pill'; };
+}
+connect();
+
+// ---- microphone capture: 16 kHz mono PCM16, streamed as binary frames ----
+const WORKLET = `
+class Pump extends AudioWorkletProcessor{
+  process(inputs){
+    const ch = inputs[0][0];
+    if (ch){
+      const pcm = new Int16Array(ch.length);
+      for (let i=0;i<ch.length;i++){ const s = Math.max(-1, Math.min(1, ch[i])); pcm[i] = s<0 ? s*0x8000 : s*0x7fff; }
+      this.port.postMessage(pcm.buffer, [pcm.buffer]);
+    }
+    return true;
+  }
+}
+registerProcessor('pump', Pump);
+`;
+
+$('#start').onclick = async () => {
+  try{
+    micStream = await navigator.mediaDevices.getUserMedia({ audio:{ channelCount:1, echoCancellation:true, noiseSuppression:true }});
+    audioCtx = new AudioContext({ sampleRate: 16000 });
+    await audioCtx.audioWorklet.addModule(URL.createObjectURL(new Blob([WORKLET], {type:'text/javascript'})));
+    node = new AudioWorkletNode(audioCtx, 'pump');
+    node.port.onmessage = (e) => { if (ws?.readyState === WebSocket.OPEN) ws.send(e.data); };
+    audioCtx.createMediaStreamSource(micStream).connect(node);
+    node.connect(audioCtx.destination);
+    running = true; $('#start').disabled = true; $('#stop').disabled = false;
+  }catch(err){ addTurn('[mic error] ' + err.message); }
+};
+
+$('#stop').onclick = () => {
+  running = false;
+  try{ ws?.send(JSON.stringify({type:'stop'})); }catch{}
+  node?.disconnect(); micStream?.getTracks().forEach(t=>t.stop()); audioCtx?.close();
+  $('#start').disabled = isStub; $('#stop').disabled = true;
+};
+
+$('#swap').onclick = () => { if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type:'swapSpeakers' })); };
+
+// ---- scripted demo: exercises the real pipeline without a microphone ----
+const SCRIPT = [
+  ['rep','Thanks for taking the call — just so you know, this call is recorded for quality.'],
+  ['customer','Sure, that’s fine. So these returns are guaranteed, right?'],
+  ['rep','I want to be precise here: past performance does not guarantee future results.'],
+  ['rep','You could lose principal, and the product is not FDIC insured.'],
+  ['rep','Our advisory fee is 0.8 percent annually, billed quarterly.'],
+];
+$('#demo').onclick = async () => {
+  for (const [speaker, text] of SCRIPT){
+    if (ws?.readyState !== WebSocket.OPEN) break;
+    ws.send(JSON.stringify({ type:'stub', text, speaker }));
+    await new Promise(r => setTimeout(r, 1100));
+  }
+};
+</script>
+</body>
+</html>
